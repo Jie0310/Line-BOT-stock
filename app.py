@@ -61,7 +61,6 @@ def get_warrants_for_stock(symbol):
     sign = "+" if quote['diff'] > 0 else ""
     header = f"【{quote['name']} ({quote['symbol']})】\n現價：{quote['current_price']:.2f} ({sign}{quote['diff']:.2f} / {sign}{quote['diff_percent']:.2f}%)\n"
     
-    # 抓取證交所公開權證彙整清單
     warrant_api = "https://openapi.twse.com.tw/v1/exchangeReport/Twt48u_ALL"
     call_list = []
     put_list = []
@@ -71,16 +70,15 @@ def get_warrants_for_stock(symbol):
         if res.status_code == 200:
             items = res.json()
             for item in items:
-                # 依欄位篩選標的代號
-                underlying = item.get('UnderlyingSecuritys', '') or item.get('Symbol', '')
+                underlying = str(item.get('UnderlyingSecuritys', '') or item.get('Symbol', '') or item.get('标的代號', ''))
+                w_code = item.get('WarrantCode', '') or item.get('權證代號', '')
+                w_name = item.get('WarrantName', '') or item.get('權證名稱', '')
+                w_type = item.get('CallPut', '') or item.get('購售', '')
+                
                 if symbol in underlying:
-                    w_code = item.get('WarrantCode', '')
-                    w_name = item.get('WarrantName', '')
-                    w_type = item.get('CallPut', '')
-                    
                     line_str = f"• {w_code} {w_name}"
                     if '購' in w_type or 'C' in w_type.upper():
-                        if len(call_list) < 5:  # 限制各顯示前 5 檔避免洗版
+                        if len(call_list) < 5:
                             call_list.append(line_str)
                     else:
                         if len(put_list) < 5:
