@@ -17,6 +17,17 @@ if channel_access_token is None or channel_secret is None:
 handler = WebhookHandler(channel_secret)
 configuration = Configuration(access_token=channel_access_token)
 
+def get_warrants_by_stock(stock_id):
+    # 這裡未來可串接證交所 API 或爬蟲抓取真實權證資料
+    # 目前先以範例格式回傳
+    call_warrants = ['0%s01P (購)' % stock_id, '0%s02P (購)' % stock_id]
+    put_warrants = ['0%s51R (售)' % stock_id]
+    
+    result = f"【{stock_id} 權證查詢結果】\n\n🟢 【認購 (購)】\n"
+    result += "\n".join(call_warrants) if call_warrants else "無資料"
+    result += "\n\n🔴 【認售 (售)】\n"
+    result += "\n".join(put_warrants) if put_warrants else "無資料"
+    return result
 
 @app.route('/callback', methods=['POST'])
 def callback():
@@ -31,14 +42,17 @@ def callback():
 
     return 'OK'
 
-
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        user_text = event.message.text
+        user_text = event.message.text.strip()
 
-        reply_text = f'你查詢的股票代號是：{user_text}\n(權證推薦功能建置中...) '
+        # 判斷是否為 4 位數股票代號
+        if user_text.isdigit() and len(user_text) == 4:
+            reply_text = get_warrants_by_stock(user_text)
+        else:
+            reply_text = "請輸入正確的 4 位數股票代號（例如：2330）"
 
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
@@ -46,7 +60,6 @@ def handle_message(event):
                 messages=[TextMessage(text=reply_text)],
             )
         )
-
 
 if __name__ == '__main__':
     app.run(port=5000)
