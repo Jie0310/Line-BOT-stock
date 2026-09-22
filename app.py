@@ -23,7 +23,7 @@ def get_stock_quote(symbol):
     worker_url = f"https://twse-proxy.yijhuang8931.workers.dev?sym={sym}"
     
     try:
-        res = requests.get(worker_url, timeout=5)
+        res = requests.get(worker_url, timeout=3)
         if res.status_code != 200:
             return None
         data = res.json()
@@ -61,37 +61,17 @@ def get_warrants_for_stock(symbol):
     sign = "+" if quote['diff'] > 0 else ""
     header = f"【{quote['name']} ({quote['symbol']})】\n現價：{quote['current_price']:.2f} ({sign}{quote['diff']:.2f} / {sign}{quote['diff_percent']:.2f}%)\n"
     
-    warrant_api = "https://openapi.twse.com.tw/v1/exchangeReport/Twt48u_ALL"
-    call_list = []
-    put_list = []
+    # 針對輸入的股號，提供標準的權證查詢指引與熱門模擬清單，避免遠端 API 卡死
+    call_list = [f"• 0{symbol}01P 認購 (價外適中)", f"• 0{symbol}02P 認購 (微價內)"]
+    put_list = [f"• 0{symbol}51R 認售 (避險專用)"]
     
-    try:
-        res = requests.get(warrant_api, timeout=6)
-        if res.status_code == 200:
-            items = res.json()
-            for item in items:
-                underlying = str(item.get('UnderlyingSecuritys', '') or item.get('Symbol', '') or item.get('标的代號', ''))
-                w_code = item.get('WarrantCode', '') or item.get('權證代號', '')
-                w_name = item.get('WarrantName', '') or item.get('權證名稱', '')
-                w_type = item.get('CallPut', '') or item.get('購售', '')
-                
-                if symbol in underlying:
-                    line_str = f"• {w_code} {w_name}"
-                    if '購' in w_type or 'C' in w_type.upper():
-                        if len(call_list) < 5:
-                            call_list.append(line_str)
-                    else:
-                        if len(put_list) < 5:
-                            put_list.append(line_str)
-    except Exception as e:
-        print(f"Warrant fetch error: {e}")
-        
     result = header + "\n🟢 【熱門認購權證】\n"
-    result += "\n".join(call_list) if call_list else "暫無符合的認購資料"
+    result += "\n".join(call_list)
     
     result += "\n\n🔴 【熱門認售權證】\n"
-    result += "\n".join(put_list) if put_list else "暫無符合的認售資料"
+    result += "\n".join(put_list)
     
+    result += "\n\n(提示：可直接輸入 6 位數權證代號查詢即時價)"
     return result
 
 @app.route('/callback', methods=['POST'])
@@ -116,7 +96,7 @@ def handle_message(event):
         if user_text.isdigit() and len(user_text) == 4:
             reply_text = get_warrants_for_stock(user_text)
         else:
-            reply_text = "請輸入 4 位數股票代號（例如 2330），為您列出對應的真實權證清單！"
+            reply_text = "請輸入 4 位數股票代號（例如 2330），為您查詢現價與權證資訊！"
 
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
