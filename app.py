@@ -238,7 +238,22 @@ def handle_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
-        # 1. 處理手續費折讓設定 (支援預設或自訂如 折數0.38 / 折數1.0)
+        # 0. 處理幫助指令
+        if user_text in ["幫助", "help", "使用說明"]:
+            help_text = (
+                "📖 【機器人使用說明】\n\n"
+                "1️⃣ **查詢即時損益**：\n"
+                "   直接輸入 **4 位數股票代號**（例如 `2330`），即可自動抓取現價並產出上下檔位損益表。\n\n"
+                "2️⃣ **自訂模擬價格**：\n"
+                "   若想盤後或特定價格試算，可輸入 `股號@價格`（例如 `2330@500`）。\n\n"
+                "3️⃣ **參數設定**（或點擊左下角圖文選單）：\n"
+                "   • 手續費折讓：傳送 `折數0.25` 或 `折數1.0`（無折扣）。\n"
+                "   • 顯示檔位範圍：傳送 `tick5`、`tick10` 等。\n"
+            )
+            line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=help_text)]))
+            return
+
+        # 1. 處理手續費折讓設定
         if user_text.startswith("折數"):
             try:
                 val_str = user_text.replace("折數", "").strip()
@@ -251,7 +266,7 @@ def handle_message(event):
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
             return
 
-        # 2. 處理 Tick 範圍設定 (如 tick5, tick10, tick15)
+        # 2. 處理 Tick 範圍設定
         if user_text.startswith("tick"):
             try:
                 t_val = int(user_text.replace("tick", "").strip())
@@ -263,7 +278,7 @@ def handle_message(event):
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
             return
 
-        # 3. 對應圖文選單 A 區塊：「手續費設定」
+        # 3. 圖文選單：「手續費設定」
         if user_text == "手續費設定":
             settings = user_settings.get(user_id, {'discount': 0.25, 'tick': 5})
             reply_text = f"⚙️ 目前手續費折讓設定：【{settings['discount']}】\n\n請點擊下方按鈕快速切換，或直接傳送訊息（例如「折數0.38」、「折數1.0」）。"
@@ -277,7 +292,7 @@ def handle_message(event):
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text, quick_reply=quick_reply)]))
             return
 
-        # 4. 對應圖文選單 B 區塊：「顯示Tick」
+        # 4. 圖文選單：「顯示Tick」
         if user_text == "顯示Tick":
             settings = user_settings.get(user_id, {'discount': 0.25, 'tick': 5})
             reply_text = f"⚙️ 目前檔位範圍設定：【±{settings['tick']} 個 Tick】\n\n請點擊下方按鈕選擇要顯示幾個檔位："
@@ -334,7 +349,7 @@ def handle_message(event):
             else:
                 reply_text = f"找不到代號 【{user_text}】 的資料。"
         else:
-            reply_text = "請輸入 4 位數股票代號（例如 2330），或使用「股號@價格」（例如 2330@500）自行指定現價試算！"
+            reply_text = "請輸入 4 位數股票代號（例如 2330），或輸入「幫助」查看完整使用說明！"
 
         line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
 
