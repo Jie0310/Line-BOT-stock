@@ -290,7 +290,34 @@ def handle_message(event):
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text, quick_reply=quick_reply)]))
             return
 
-        # 5. 查詢 4 位數股票代號
+        # 5. 支援自訂模擬價格查詢：格式為「股號@價格」（例如：2330@500）
+        if "@" in user_text:
+            try:
+                parts = user_text.split("@")
+                sym = parts[0].strip()
+                custom_price = float(parts[1].strip())
+                if sym.isdigit() and len(sym) == 4:
+                    settings = user_settings.get(user_id, {'discount': 0.25, 'tick': 5})
+                    quote = {
+                        'symbol': sym,
+                        'name': f"自訂模擬股({sym})",
+                        'current_price': custom_price,
+                        'prev_close': custom_price,
+                        'diff': 0.0,
+                        'diff_percent': 0.0
+                    }
+                    flex_msg = create_tick_table_flex_message(quote, settings['discount'], settings['tick'])
+                    line_bot_api.reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[FlexMessage(alt_text=f"{sym} 自訂價格損益表", contents=flex_msg)]
+                        )
+                    )
+                    return
+            except Exception as e:
+                print(f"Custom price error: {e}")
+
+        # 6. 一般 4 位數股票代號查詢 (自動抓即時現價)
         if user_text.isdigit() and len(user_text) == 4:
             quote = get_stock_quote(user_text)
             if quote:
@@ -307,7 +334,7 @@ def handle_message(event):
             else:
                 reply_text = f"找不到代號 【{user_text}】 的資料。"
         else:
-            reply_text = "請輸入 4 位數股票代號（例如 2330），或點擊左下角選單調整設定！"
+            reply_text = "請輸入 4 位數股票代號（例如 2330），或使用「股號@價格」（例如 2330@500）自行指定現價試算！"
 
         line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
 
