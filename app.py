@@ -90,9 +90,6 @@ def create_tick_table_flex_message(quote, discount, tick_range):
     diff_sign = "+" if quote['diff'] > 0 else ""
     diff_color = "#ff453a" if quote['diff'] > 0 else ("#30d158" if quote['diff'] < 0 else "#8e8e93")
     
-    # 產生上方 Tick 列表 (由高到低排列)
-    rows = []
-    
     # 往上漲的 Tick
     cur = p
     up_items = []
@@ -109,10 +106,9 @@ def create_tick_table_flex_message(quote, discount, tick_range):
         net_p, roi = calculate_trade(p, cur, 1000, discount)
         down_items.append((f"-{i}檔", cur, net_p, roi))
 
-    # 組合表格內容 (由高到低)
     table_contents = []
     
-    # 先放漲的 (反轉讓最高價在最上面)
+    # 放漲的 (反轉讓最高價在最上面)
     for tag, price, net_p, roi in reversed(up_items):
         p_color = "#ff453a" if net_p > 0 else "#30d158"
         p_sign = "+" if net_p > 0 else ""
@@ -127,7 +123,7 @@ def create_tick_table_flex_message(quote, discount, tick_range):
             "margin": "sm"
         })
         
-    # 當前價基准列
+    # 當前價基準列
     table_contents.append({
         "type": "box",
         "layout": "horizontal",
@@ -242,7 +238,7 @@ def handle_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
-        # 設定手續費折讓
+        # 1. 處理手續費折讓設定 (支援預設或自訂如 折數0.38 / 折數1.0)
         if user_text.startswith("折數"):
             try:
                 val_str = user_text.replace("折數", "").strip()
@@ -251,11 +247,11 @@ def handle_message(event):
                 user_settings[user_id]['discount'] = discount
                 reply_text = f"✅ 手續費折讓已更新為：【{discount}】"
             except:
-                reply_text = "格式錯誤，請輸入如「折數0.25」"
+                reply_text = "格式錯誤，請輸入如「折數0.25」或「折數1.0」"
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
             return
 
-        # 設定顯示幾個 Tick
+        # 2. 處理 Tick 範圍設定 (如 tick5, tick10, tick15)
         if user_text.startswith("tick"):
             try:
                 t_val = int(user_text.replace("tick", "").strip())
@@ -267,22 +263,34 @@ def handle_message(event):
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
             return
 
-        # 點擊左下角「手續費設定」時的選單
+        # 3. 對應圖文選單 A 區塊：「手續費設定」
         if user_text == "手續費設定":
             settings = user_settings.get(user_id, {'discount': 0.25, 'tick': 5})
-            reply_text = f"⚙️ 目前設定：\n- 手續費折讓：{settings['discount']}\n- 檔位範圍：±{settings['tick']} 個 Tick\n\n【快速調整按鈕】：\n點擊下方按鈕或直接傳送指令（例如「折數0.25」、「tick10」）。"
+            reply_text = f"⚙️ 目前手續費折讓設定：【{settings['discount']}】\n\n請點擊下方按鈕快速切換，或直接傳送訊息（例如「折數0.38」、「折數1.0」）。"
             quick_reply = QuickReply(items=[
                 QuickReplyItem(action=MessageAction(label="0.2折", text="折數0.2")),
                 QuickReplyItem(action=MessageAction(label="0.25折", text="折數0.25")),
                 QuickReplyItem(action=MessageAction(label="0.3折", text="折數0.3")),
-                QuickReplyItem(action=MessageAction(label="±5檔", text="tick5")),
-                QuickReplyItem(action=MessageAction(label="±10檔", text="tick10")),
-                QuickReplyItem(action=MessageAction(label="±15檔", text="tick15")),
+                QuickReplyItem(action=MessageAction(label="0.5折", text="折數0.5")),
+                QuickReplyItem(action=MessageAction(label="1.0折(無折)", text="折數1.0")),
             ])
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text, quick_reply=quick_reply)]))
             return
 
-        # 查詢股票代號
+        # 4. 對應圖文選單 B 區塊：「顯示Tick」
+        if user_text == "顯示Tick":
+            settings = user_settings.get(user_id, {'discount': 0.25, 'tick': 5})
+            reply_text = f"⚙️ 目前檔位範圍設定：【±{settings['tick']} 個 Tick】\n\n請點擊下方按鈕選擇要顯示幾個檔位："
+            quick_reply = QuickReply(items=[
+                QuickReplyItem(action=MessageAction(label="±5 檔", text="tick5")),
+                QuickReplyItem(action=MessageAction(label="±10 檔", text="tick10")),
+                QuickReplyItem(action=MessageAction(label="±15 檔", text="tick15")),
+                QuickReplyItem(action=MessageAction(label="±20 檔", text="tick20")),
+            ])
+            line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text, quick_reply=quick_reply)]))
+            return
+
+        # 5. 查詢 4 位數股票代號
         if user_text.isdigit() and len(user_text) == 4:
             quote = get_stock_quote(user_text)
             if quote:
