@@ -3,8 +3,8 @@ import requests
 from flask import Flask, abort, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, ReplyMessageRequest, FlexMessage, FlexContainer, TextMessage, QuickReply, QuickReplyItem, PostbackAction, MessageAction
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, PostbackEvent
+from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, ReplyMessageRequest, FlexMessage, FlexContainer, TextMessage, QuickReply, QuickReplyItem, MessageAction
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
@@ -18,8 +18,8 @@ if channel_access_token is None or channel_secret is None:
 handler = WebhookHandler(channel_secret)
 configuration = Configuration(access_token=channel_access_token)
 
-# 記錄每個使用者的手續費折讓設定（簡單記憶體儲存，重啟會重置，後續可改接資料庫）
-user_discounts = {}
+# 儲存每個使用者的設定 (折數與 Tick 範圍)
+user_settings = {}
 
 def get_tick_size(price):
     if price < 10: return 0.01
@@ -28,6 +28,14 @@ def get_tick_size(price):
     if price < 500: return 0.50
     if price < 1000: return 1.00
     return 5.00
+
+def step_tick(price, direction):
+    p = float(price)
+    tick = get_tick_size(p)
+    if direction > 0:
+        return round(p + tick, 2)
+    else:
+        return max(0.01, round(p - tick, 2))
 
 def calculate_trade(base_p, target_p, shares, discount=0.25, tax_rate=0.0015):
     buy_amt = base_p * shares
@@ -40,7 +48,7 @@ def calculate_trade(base_p, target_p, shares, discount=0.25, tax_rate=0.0015):
     net_profit = int(sell_amt - buy_amt - total_cost)
     capital_base = buy_amt + buy_fee
     roi = (net_profit / capital_base * 100) if capital_base > 0 else 0
-    return net_profit, roi, total_cost
+    return net_profit, roi
 
 def get_stock_quote(symbol):
     sym = symbol.strip().upper()
@@ -77,15 +85,74 @@ def get_stock_quote(symbol):
         print(f"Error fetching quote: {e}")
         return None
 
-def create_stock_flex_message(quote, discount):
+def create_tick_table_flex_message(quote, discount, tick_range):
     p = quote['current_price']
     diff_sign = "+" if quote['diff'] > 0 else ""
     diff_color = "#ff453a" if quote['diff'] > 0 else ("#30d158" if quote['diff'] < 0 else "#8e8e93")
     
-    up_limit = round(quote['prev_close'] * 1.10, 2)
-    down_limit = round(quote['prev_close'] * 0.90, 2)
-    up_profit, up_roi, _ = calculate_trade(p, up_limit, 1000, discount)
-    down_loss, down_roi, _ = calculate_trade(p, down_limit, 1000, discount)
+    # 產生上方 Tick 列表 (由高到低排列)
+    rows = []
+    
+    # 往上漲的 Tick
+    cur = p
+    up_items = []
+    for i in range(1, tick_range + 1):
+        cur = step_tick(cur, 1)
+        net_p, roi = calculate_trade(p, cur, 1000, discount)
+        up_items.append((f"+{i}檔", cur, net_p, roi))
+    
+    # 往下跌的 Tick
+    cur = p
+    down_items = []
+    for i in range(1, tick_range + 1):
+        cur = step_tick(cur, -1)
+        net_p, roi = calculate_trade(p, cur, 1000, discount)
+        down_items.append((f"-{i}檔", cur, net_p, roi))
+
+    # 組合表格內容 (由高到低)
+    table_contents = []
+    
+    # 先放漲的 (反轉讓最高價在最上面)
+    for tag, price, net_p, roi in reversed(up_items):
+        p_color = "#ff453a" if net_p > 0 else "#30d158"
+        p_sign = "+" if net_p > 0 else ""
+        table_contents.append({
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {"type": "text", "text": tag, "size": "xs", "color": "#8e8e93", "flex": 1},
+                {"type": "text", "text": f"{price:.2f}", "size": "xs", "color": "#ffffff", "weight": "bold", "flex": 2, "align": "center"},
+                {"type": "text", "text": f"{p_sign}{net_p:,} ({p_sign}{roi:.1f}%)", "size": "xs", "color": p_color, "weight": "bold", "flex": 3, "align": "end"}
+            ],
+            "margin": "sm"
+        })
+        
+    # 當前價基准列
+    table_contents.append({
+        "type": "box",
+        "layout": "horizontal",
+        "contents": [
+            {"type": "text", "text": "現價基準", "size": "xs", "color": "#0a84ff", "flex": 1, "weight": "bold"},
+            {"type": "text", "text": f"{p:.2f}", "size": "xs", "color": "#0a84ff", "weight": "bold", "flex": 2, "align": "center"},
+            {"type": "text", "text": "0 (0.0%)", "size": "xs", "color": "#8e8e93", "weight": "bold", "flex": 3, "align": "end"}
+        ],
+        "margin": "sm"
+    })
+
+    # 放跌的
+    for tag, price, net_p, roi in down_items:
+        p_color = "#ff453a" if net_p > 0 else "#30d158"
+        p_sign = "+" if net_p > 0 else ""
+        table_contents.append({
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {"type": "text", "text": tag, "size": "xs", "color": "#8e8e93", "flex": 1},
+                {"type": "text", "text": f"{price:.2f}", "size": "xs", "color": "#ffffff", "weight": "bold", "flex": 2, "align": "center"},
+                {"type": "text", "text": f"{p_sign}{net_p:,} ({p_sign}{roi:.1f}%)", "size": "xs", "color": p_color, "weight": "bold", "flex": 3, "align": "end"}
+            ],
+            "margin": "sm"
+        })
 
     flex_content = {
       "type": "bubble",
@@ -107,8 +174,8 @@ def create_stock_flex_message(quote, discount):
               },
               {
                 "type": "text",
-                "text": f"折讓: {discount*10:.1f}折",
-                "size": "xs",
+                "text": f"折讓:{discount} | ±{tick_range}檔",
+                "size": "xxs",
                 "color": "#0a84ff",
                 "align": "end",
                 "weight": "bold",
@@ -123,7 +190,7 @@ def create_stock_flex_message(quote, discount):
               {
                 "type": "text",
                 "text": f"{p:.2f}",
-                "size": "xxl",
+                "size": "xl",
                 "weight": "bold",
                 "color": "#ffffff",
                 "flex": 0
@@ -131,13 +198,13 @@ def create_stock_flex_message(quote, discount):
               {
                 "type": "text",
                 "text": f"  {diff_sign}{quote['diff']:.2f} ({diff_sign}{quote['diff_percent']:.2f}%)",
-                "size": "sm",
+                "size": "xs",
                 "color": diff_color,
                 "weight": "bold",
                 "flex": 0
               }
             ],
-            "margin": "sm"
+            "margin": "xs"
           },
           {
             "type": "separator",
@@ -147,49 +214,12 @@ def create_stock_flex_message(quote, discount):
           {
             "type": "box",
             "layout": "vertical",
-            "contents": [
-              {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": [
-                  {"type": "text", "text": "當前跳動單位", "size": "sm", "color": "#8e8e93", "flex": 1},
-                  {"type": "text", "text": f"{get_tick_size(p)} 元", "size": "sm", "color": "#ffffff", "align": "end", "weight": "bold"}
-                ],
-                "margin": "sm"
-              },
-              {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": [
-                  {"type": "text", "text": "整張買進總額(含費)", "size": "sm", "color": "#8e8e93", "flex": 1},
-                  {"type": "text", "text": f"{int(p * 1000):,} 元", "size": "sm", "color": "#ffffff", "align": "end", "weight": "bold"}
-                ],
-                "margin": "sm"
-              },
-              {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": [
-                  {"type": "text", "text": "漲停賺多少 (+10%)", "size": "sm", "color": "#8e8e93", "flex": 1},
-                  {"type": "text", "text": f"+{up_profit:,} 元 ({up_roi:.2f}%)", "size": "sm", "color": "#ff453a", "align": "end", "weight": "bold"}
-                ],
-                "margin": "sm"
-              },
-              {
-                "type": "box",
-                "layout": "horizontal",
-                "contents": [
-                  {"type": "text", "text": "跌停賠多少 (-10%)", "size": "sm", "color": "#8e8e93", "flex": 1},
-                  {"type": "text", "text": f"{down_loss:,} 元 ({down_roi:.2f}%)", "size": "sm", "color": "#30d158", "align": "end", "weight": "bold"}
-                ],
-                "margin": "sm"
-              }
-            ],
+            "contents": table_contents,
             "margin": "md"
           }
         ],
         "backgroundColor": "#1c1c1e",
-        "paddingAll": "16px"
+        "paddingAll": "14px"
       }
     }
     return FlexContainer.from_dict(flex_content)
@@ -209,61 +239,69 @@ def handle_message(event):
     user_id = event.source.user_id if event.source else 'default'
     user_text = event.message.text.strip()
     
-    # 檢查是否為設定指令
-    if user_text.startswith("折數"):
-        try:
-            val = float(user_text.replace("折數", "").strip())
-            discount = val / 10.0
-            user_discounts[user_id] = discount
-            reply_text = f"✅ 已成功將您的手續費設定為 【{val} 折】！\n請直接輸入 4 位數股票代號（例如 2330）開始計算。"
-        except:
-            reply_text = "設定格式錯誤，請輸入「折數2.5」或「折數3」。"
-            
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply_text)]
-                )
-            )
-        return
-
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
+        # 設定手續費折讓
+        if user_text.startswith("折數"):
+            try:
+                val_str = user_text.replace("折數", "").strip()
+                discount = float(val_str)
+                if user_id not in user_settings: user_settings[user_id] = {'discount': 0.25, 'tick': 5}
+                user_settings[user_id]['discount'] = discount
+                reply_text = f"✅ 手續費折讓已更新為：【{discount}】"
+            except:
+                reply_text = "格式錯誤，請輸入如「折數0.25」"
+            line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
+            return
+
+        # 設定顯示幾個 Tick
+        if user_text.startswith("tick"):
+            try:
+                t_val = int(user_text.replace("tick", "").strip())
+                if user_id not in user_settings: user_settings[user_id] = {'discount': 0.25, 'tick': 5}
+                user_settings[user_id]['tick'] = t_val
+                reply_text = f"✅ 檔位範圍已更新為：【±{t_val} 個 Tick】"
+            except:
+                reply_text = "格式錯誤，請輸入如「tick5」或「tick10」"
+            line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
+            return
+
+        # 點擊左下角「手續費設定」時的選單
+        if user_text == "手續費設定":
+            settings = user_settings.get(user_id, {'discount': 0.25, 'tick': 5})
+            reply_text = f"⚙️ 目前設定：\n- 手續費折讓：{settings['discount']}\n- 檔位範圍：±{settings['tick']} 個 Tick\n\n【快速調整按鈕】：\n點擊下方按鈕或直接傳送指令（例如「折數0.25」、「tick10」）。"
+            quick_reply = QuickReply(items=[
+                QuickReplyItem(action=MessageAction(label="0.2折", text="折數0.2")),
+                QuickReplyItem(action=MessageAction(label="0.25折", text="折數0.25")),
+                QuickReplyItem(action=MessageAction(label="0.3折", text="折數0.3")),
+                QuickReplyItem(action=MessageAction(label="±5檔", text="tick5")),
+                QuickReplyItem(action=MessageAction(label="±10檔", text="tick10")),
+                QuickReplyItem(action=MessageAction(label="±15檔", text="tick15")),
+            ])
+            line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text, quick_reply=quick_reply)]))
+            return
+
+        # 查詢股票代號
         if user_text.isdigit() and len(user_text) == 4:
             quote = get_stock_quote(user_text)
             if quote:
-                discount = user_discounts.get(user_id, 0.25) # 預設 2.5 折
-                flex_msg = create_stock_flex_message(quote, discount)
-                
-                # 加入快捷按鈕讓使用者隨時切換折數
-                quick_reply = QuickReply(items=[
-                    QuickReplyItem(action=MessageAction(label="設定 2折", text="折數2")),
-                    QuickReplyItem(action=MessageAction(label="設定 2.5折", text="折數2.5")),
-                    QuickReplyItem(action=MessageAction(label="設定 3折", text="折數3")),
-                    QuickReplyItem(action=MessageAction(label="設定 2.8折", text="折數2.8")),
-                ])
+                settings = user_settings.get(user_id, {'discount': 0.25, 'tick': 5})
+                flex_msg = create_tick_table_flex_message(quote, settings['discount'], settings['tick'])
                 
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[FlexMessage(alt_text=f"{quote['name']} 即時行情", contents=flex_msg, quick_reply=quick_reply)]
+                        messages=[FlexMessage(alt_text=f"{quote['name']} 檔位損益表", contents=flex_msg)]
                     )
                 )
                 return
             else:
                 reply_text = f"找不到代號 【{user_text}】 的資料。"
         else:
-            reply_text = "請輸入 4 位數股票代號（例如 2330），或點擊下方快捷按鈕隨時調整手續費折讓！"
+            reply_text = "請輸入 4 位數股票代號（例如 2330），或點擊左下角選單調整設定！"
 
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
-            )
-        )
+        line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
 
 if __name__ == '__main__':
     app.run(port=5000)
