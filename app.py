@@ -3,7 +3,7 @@ import requests
 from flask import Flask, abort, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, ReplyMessageRequest, TextMessage
+from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, ReplyMessageRequest, FlexMessage, FlexContainer, TextMessage
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
@@ -18,10 +18,38 @@ if channel_access_token is None or channel_secret is None:
 handler = WebhookHandler(channel_secret)
 configuration = Configuration(access_token=channel_access_token)
 
+def get_tick_size(price):
+    if price < 10: return 0.01
+    if price < 50: return 0.05
+    if price < 100: return 0.10
+    if price < 500: return 0.50
+    if price < 1000: return 1.00
+    return 5.00
+
+def step_tick(price, direction):
+    p = float(price)
+    tick = get_tick_size(p)
+    if direction > 0:
+        return round(p + tick, 2)
+    else:
+        return max(0.01, round(p - tick, 2))
+
+def calculate_trade(base_p, target_p, shares, discount=0.25, tax_rate=0.0015):
+    buy_amt = base_p * shares
+    sell_amt = target_p * shares
+    min_fee = 20
+    buy_fee = max(min_fee, int(buy_amt * 0.001425 * discount))
+    sell_fee = max(min_fee, int(sell_amt * 0.001425 * discount))
+    tax = int(sell_amt * tax_rate)
+    total_cost = buy_fee + sell_fee + tax
+    net_profit = int(sell_amt - buy_amt - total_cost)
+    capital_base = buy_amt + buy_fee
+    roi = (net_profit / capital_base * 100) if capital_base > 0 else 0
+    return net_profit, roi, total_cost
+
 def get_stock_quote(symbol):
     sym = symbol.strip().upper()
     worker_url = f"https://twse-proxy.yijhuang8931.workers.dev?sym={sym}"
-    
     try:
         res = requests.get(worker_url, timeout=4)
         if res.status_code != 200:
@@ -46,6 +74,7 @@ def get_stock_quote(symbol):
             'symbol': sym,
             'name': name,
             'current_price': current_price,
+            'prev_close': prev_close,
             'diff': diff,
             'diff_percent': diff_percent
         }
@@ -53,68 +82,116 @@ def get_stock_quote(symbol):
         print(f"Error fetching quote: {e}")
         return None
 
-def get_real_warrants_for_stock(symbol):
-    quote = get_stock_quote(symbol)
-    if not quote:
-        return f"找不到代號 【{symbol}】 的現股資料，請確認代號是否正確。"
-        
-    sign = "+" if quote['diff'] > 0 else ""
-    header = f"【{quote['name']} ({quote['symbol']})】\n現價：{quote['current_price']:.2f} ({sign}{quote['diff']:.2f} / {sign}{quote['diff_percent']:.2f}%)\n"
+def create_stock_flex_message(quote):
+    p = quote['current_price']
+    diff_sign = "+" if quote['diff'] > 0 else ""
+    diff_color = "#ff453a" if quote['diff'] > 0 else ("#30d158" if quote['diff'] < 0 else "#8e8e93")
     
-    call_list = []
-    put_list = []
-    
-    # 透過證交所權證代號正式 API 進行過濾
-    try:
-        url = "https://openapi.twse.com.tw/v1/exchangeReport/Twt48u_ALL"
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200:
-            items = res.json()
-            for item in items:
-                underlying = str(item.get('UnderlyingSecuritys', '') or item.get('Symbol', ''))
-                if symbol in underlying:
-                    w_code = str(item.get('WarrantCode', ''))
-                    w_name = str(item.get('WarrantName', ''))
-                    w_type = str(item.get('CallPut', ''))
-                    
-                    # 確保抓到的權證代號是嚴格的 6 位數
-                    if len(w_code) == 6:
-                        row_str = f"• {w_code} {w_name}"
-                        if '購' in w_type or 'C' in w_type.upper():
-                            if len(call_list) < 4:
-                                call_list.append(row_str)
-                        else:
-                            if len(put_list) < 4:
-                                put_list.append(row_str)
-    except Exception as e:
-        print(f"Fetch warrant error: {e}")
+    # 計算漲停價 (+10%) 與跌停價 (-10%)
+    up_limit = round(quote['prev_close'] * 1.10, 2)
+    down_limit = round(quote['prev_close'] * 0.90, 2)
+    up_profit, up_roi, _ = calculate_trade(p, up_limit, 1000)
+    down_loss, down_roi, _ = calculate_trade(p, down_limit, 1000)
 
-    result = header + "\n🟢 【認購權證】\n"
-    if call_list:
-        result += "\n".join(call_list)
-    else:
-        # 當API未回傳時，提供符合 6 位數規則的真實範例（例如 07 開頭 6 碼）
-        result += f"• 07{symbol[1:]}1 永豐購\n• 08{symbol[1:]}2 元大購"
-        
-    result += "\n\n🔴 【認售權證】\n"
-    if put_list:
-        result += "\n".join(put_list)
-    else:
-        result += f"• 08{symbol[1:]}5 元大售"
-        
-    return result
+    flex_content = {
+      "type": "bubble",
+      "body": {
+        "type": "box",
+        "layout": "vertical",
+        "contents": [
+          {
+            "type": "text",
+            "text": f"{quote['name']} ({quote['symbol']})",
+            "weight": "bold",
+            "size": "lg",
+            "color": "#ffffff"
+          },
+          {
+            "type": "box",
+            "layout": "baseline",
+            "contents": [
+              {
+                "type": "text",
+                "text": f"{p:.2f}",
+                "size": "xxl",
+                "weight": "bold",
+                "color": "#ffffff",
+                "flex": 0
+              },
+              {
+                "type": "text",
+                "text": f"  {diff_sign}{quote['diff']:.2f} ({diff_sign}{quote['diff_percent']:.2f}%)",
+                "size": "sm",
+                "color": diff_color,
+                "weight": "bold",
+                "flex": 0
+              }
+            ],
+            "margin": "md"
+          },
+          {
+            "type": "separator",
+            "margin": "lg",
+            "color": "#38383a"
+          },
+          {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                  {"type": "text", "text": "當前跳動單位", "size": "sm", "color": "#8e8e93", "flex": 1},
+                  {"type": "text", "text": f"{get_tick_size(p)} 元", "size": "sm", "color": "#ffffff", "align": "end", "weight": "bold"}
+                ],
+                "margin": "sm"
+              },
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                  {"type": "text", "text": "整張買進總額(含費)", "size": "sm", "color": "#8e8e93", "flex": 1},
+                  {"type": "text", "text": f"{int(p * 1000):,} 元", "size": "sm", "color": "#ffffff", "align": "end", "weight": "bold"}
+                ],
+                "margin": "sm"
+              },
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                  {"type": "text", "text": "漲停賺多少 (+10%)", "size": "sm", "color": "#8e8e93", "flex": 1},
+                  {"type": "text", "text": f"+{up_profit:,} 元 ({up_roi:.2f}%)", "size": "sm", "color": "#ff453a", "align": "end", "weight": "bold"}
+                ],
+                "margin": "sm"
+              },
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                  {"type": "text", "text": "跌停賠多少 (-10%)", "size": "sm", "color": "#8e8e93", "flex": 1},
+                  {"type": "text", "text": f"{down_loss:,} 元 ({down_roi:.2f}%)", "size": "sm", "color": "#30d158", "align": "end", "weight": "bold"}
+                ],
+                "margin": "sm"
+              }
+            ],
+            "margin": "lg"
+          }
+        ],
+        "backgroundColor": "#1c1c1e",
+        "paddingAll": "20px"
+      }
+    }
+    return FlexContainer.from_dict(flex_content)
 
 @app.route('/callback', methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    app.logger.info('Request body: ' + body)
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -124,14 +201,25 @@ def handle_message(event):
         user_text = event.message.text.strip()
 
         if user_text.isdigit() and len(user_text) == 4:
-            reply_text = get_real_warrants_for_stock(user_text)
+            quote = get_stock_quote(user_text)
+            if quote:
+                flex_msg = create_stock_flex_message(quote)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[FlexMessage(alt_text=f"{quote['name']} 即時行情與試算", contents=flex_msg)]
+                    )
+                )
+                return
+            else:
+                reply_text = f"找不到代號 【{user_text}】 的資料。"
         else:
-            reply_text = "請輸入 4 位數股票代號（例如 2330），為您列出權證！"
+            reply_text = "請輸入 4 位數股票代號（例如 2330），直接為您計算即時損益與行情！"
 
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)],
+                messages=[TextMessage(text=reply_text)]
             )
         )
 
