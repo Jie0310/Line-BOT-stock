@@ -3,8 +3,8 @@ import requests
 from flask import Flask, abort, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, ReplyMessageRequest, FlexMessage, FlexContainer, TextMessage
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, ReplyMessageRequest, FlexMessage, FlexContainer, TextMessage, QuickReply, QuickReplyItem, PostbackAction, MessageAction
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, PostbackEvent
 
 app = Flask(__name__)
 
@@ -18,6 +18,9 @@ if channel_access_token is None or channel_secret is None:
 handler = WebhookHandler(channel_secret)
 configuration = Configuration(access_token=channel_access_token)
 
+# 記錄每個使用者的手續費折讓設定（簡單記憶體儲存，重啟會重置，後續可改接資料庫）
+user_discounts = {}
+
 def get_tick_size(price):
     if price < 10: return 0.01
     if price < 50: return 0.05
@@ -25,14 +28,6 @@ def get_tick_size(price):
     if price < 500: return 0.50
     if price < 1000: return 1.00
     return 5.00
-
-def step_tick(price, direction):
-    p = float(price)
-    tick = get_tick_size(p)
-    if direction > 0:
-        return round(p + tick, 2)
-    else:
-        return max(0.01, round(p - tick, 2))
 
 def calculate_trade(base_p, target_p, shares, discount=0.25, tax_rate=0.0015):
     buy_amt = base_p * shares
@@ -82,16 +77,15 @@ def get_stock_quote(symbol):
         print(f"Error fetching quote: {e}")
         return None
 
-def create_stock_flex_message(quote):
+def create_stock_flex_message(quote, discount):
     p = quote['current_price']
     diff_sign = "+" if quote['diff'] > 0 else ""
     diff_color = "#ff453a" if quote['diff'] > 0 else ("#30d158" if quote['diff'] < 0 else "#8e8e93")
     
-    # 計算漲停價 (+10%) 與跌停價 (-10%)
     up_limit = round(quote['prev_close'] * 1.10, 2)
     down_limit = round(quote['prev_close'] * 0.90, 2)
-    up_profit, up_roi, _ = calculate_trade(p, up_limit, 1000)
-    down_loss, down_roi, _ = calculate_trade(p, down_limit, 1000)
+    up_profit, up_roi, _ = calculate_trade(p, up_limit, 1000, discount)
+    down_loss, down_roi, _ = calculate_trade(p, down_limit, 1000, discount)
 
     flex_content = {
       "type": "bubble",
@@ -100,11 +94,27 @@ def create_stock_flex_message(quote):
         "layout": "vertical",
         "contents": [
           {
-            "type": "text",
-            "text": f"{quote['name']} ({quote['symbol']})",
-            "weight": "bold",
-            "size": "lg",
-            "color": "#ffffff"
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+              {
+                "type": "text",
+                "text": f"{quote['name']} ({quote['symbol']})",
+                "weight": "bold",
+                "size": "md",
+                "color": "#ffffff",
+                "flex": 1
+              },
+              {
+                "type": "text",
+                "text": f"折讓: {discount*10:.1f}折",
+                "size": "xs",
+                "color": "#0a84ff",
+                "align": "end",
+                "weight": "bold",
+                "flex": 0
+              }
+            ]
           },
           {
             "type": "box",
@@ -127,11 +137,11 @@ def create_stock_flex_message(quote):
                 "flex": 0
               }
             ],
-            "margin": "md"
+            "margin": "sm"
           },
           {
             "type": "separator",
-            "margin": "lg",
+            "margin": "md",
             "color": "#38383a"
           },
           {
@@ -175,11 +185,11 @@ def create_stock_flex_message(quote):
                 "margin": "sm"
               }
             ],
-            "margin": "lg"
+            "margin": "md"
           }
         ],
         "backgroundColor": "#1c1c1e",
-        "paddingAll": "20px"
+        "paddingAll": "16px"
       }
     }
     return FlexContainer.from_dict(flex_content)
@@ -196,25 +206,57 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    user_id = event.source.user_id if event.source else 'default'
+    user_text = event.message.text.strip()
+    
+    # 檢查是否為設定指令
+    if user_text.startswith("折數"):
+        try:
+            val = float(user_text.replace("折數", "").strip())
+            discount = val / 10.0
+            user_discounts[user_id] = discount
+            reply_text = f"✅ 已成功將您的手續費設定為 【{val} 折】！\n請直接輸入 4 位數股票代號（例如 2330）開始計算。"
+        except:
+            reply_text = "設定格式錯誤，請輸入「折數2.5」或「折數3」。"
+            
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply_text)]
+                )
+            )
+        return
+
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        user_text = event.message.text.strip()
 
         if user_text.isdigit() and len(user_text) == 4:
             quote = get_stock_quote(user_text)
             if quote:
-                flex_msg = create_stock_flex_message(quote)
+                discount = user_discounts.get(user_id, 0.25) # 預設 2.5 折
+                flex_msg = create_stock_flex_message(quote, discount)
+                
+                # 加入快捷按鈕讓使用者隨時切換折數
+                quick_reply = QuickReply(items=[
+                    QuickReplyItem(action=MessageAction(label="設定 2折", text="折數2")),
+                    QuickReplyItem(action=MessageAction(label="設定 2.5折", text="折數2.5")),
+                    QuickReplyItem(action=MessageAction(label="設定 3折", text="折數3")),
+                    QuickReplyItem(action=MessageAction(label="設定 2.8折", text="折數2.8")),
+                ])
+                
                 line_bot_api.reply_message_with_http_info(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[FlexMessage(alt_text=f"{quote['name']} 即時行情與試算", contents=flex_msg)]
+                        messages=[FlexMessage(alt_text=f"{quote['name']} 即時行情", contents=flex_msg, quick_reply=quick_reply)]
                     )
                 )
                 return
             else:
                 reply_text = f"找不到代號 【{user_text}】 的資料。"
         else:
-            reply_text = "請輸入 4 位數股票代號（例如 2330），直接為您計算即時損益與行情！"
+            reply_text = "請輸入 4 位數股票代號（例如 2330），或點擊下方快捷按鈕隨時調整手續費折讓！"
 
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
