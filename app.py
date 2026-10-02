@@ -58,6 +58,22 @@ def get_stock_quote(symbol):
         print(f"Error fetching quote: {e}")
         return None
 
+# 格式化股票資訊文字
+def format_quote_text(quote):
+    diff = quote['diff']
+    if diff > 0:
+        diff_str = f"▲ +{diff:.2f} (+{quote['diff_percent']:.2f}%)"
+    elif diff < 0:
+        diff_str = f"▼ {diff:.2f} ({quote['diff_percent']:.2f}%)"
+    else:
+        diff_str = f"- 0.00 (0.00%)"
+        
+    return (
+        f"📌 {quote['name']} ({quote['symbol']})\n"
+        f"現價：{quote['current_price']:.2f}\n"
+        f"平盤比較：{diff_str}"
+    )
+
 # 定時推播任務 (每日 13:30 執行)
 def job_daily_closing_report():
     print("⏰ 觸發每日 13:30 收盤回報任務...")
@@ -75,11 +91,7 @@ def job_daily_closing_report():
             for sym in symbols:
                 quote = get_stock_quote(sym)
                 if quote:
-                    diff_sign = "+" if quote['diff'] > 0 else ""
-                    report_lines.append(
-                        f"• {quote['name']} ({sym})\n"
-                        f"  收盤價: {quote['current_price']:.2f} | 漲跌: {diff_sign}{quote['diff']:.2f} ({diff_sign}{quote['diff_percent']:.2f}%)\n"
-                    )
+                    report_lines.append(format_quote_text(quote) + "\n")
                 else:
                     report_lines.append(f"• 股票代號 {sym} 暫時無法取得收盤價\n")
             
@@ -117,15 +129,15 @@ def handle_message(event):
         line_bot_api = MessagingApi(api_client)
 
         # 幫助指令
-        if user_text in ["幫助", "help", "使用說明"]:
+        if user_text in ["幫助", "/幫助", "help", "使用說明"]:
             help_text = (
                 "📖 【機器人使用說明】\n\n"
-                "1️⃣ **查詢即時股價**：直接輸入 4 位數代號（例如 `2330` 或 `7711`）。\n"
+                "1️⃣ **查詢股價**：直接輸入 4 位數代號（例如 `7711` 或 `2330`）。\n\n"
                 "2️⃣ **每日收盤追蹤**：\n"
-                "   • 輸入 `追蹤2330` 加入清單\n"
+                "   • 輸入 `追蹤7711` 加入清單\n"
                 "   • 輸入 `我的追蹤` 查看清單\n"
-                "   • 輸入 `取消追蹤2330` 移除\n"
-                "   (系統將於每個交易日 13:30 自動推播收盤價)\n"
+                "   • 輸入 `取消追蹤7711` 移除\n"
+                "   (系統將於每個交易日 13:30 自動推播收盤價與平盤比較)\n"
             )
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=help_text)]))
             return
@@ -140,7 +152,7 @@ def handle_message(event):
                     user_watchlist[user_id].append(sym)
                 reply_text = f"✅ 已成功將 【{sym}】 加入每日 13:30 收盤追蹤清單！目前清單：{user_watchlist[user_id]}"
             else:
-                reply_text = "格式錯誤，請輸入如「追蹤2330」"
+                reply_text = "格式錯誤，請輸入如「追蹤7711」"
             line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
             return
 
@@ -164,16 +176,11 @@ def handle_message(event):
         if user_text.isdigit() and len(user_text) == 4:
             quote = get_stock_quote(user_text)
             if quote:
-                diff_sign = "+" if quote['diff'] > 0 else ""
-                reply_text = (
-                    f"📈 {quote['name']} ({quote['symbol']})\n"
-                    f"現價：{quote['current_price']:.2f}\n"
-                    f"漲跌：{diff_sign}{quote['diff']:.2f} ({diff_sign}{quote['diff_percent']:.2f}%)"
-                )
+                reply_text = format_quote_text(quote)
             else:
                 reply_text = f"找不到代號 【{user_text}】 的資料。"
         else:
-            reply_text = "請輸入 4 位數股票代號（例如 2330），或輸入「幫助」查看使用說明！"
+            reply_text = "請輸入 4 位數股票代號（例如 7711），或輸入「幫助」查看使用說明！"
 
         line_bot_api.reply_message_with_http_info(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
 
